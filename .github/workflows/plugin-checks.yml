@@ -171,7 +171,9 @@ jobs:
           if [ -d divi5 ]; then
             mkdir -p "$dest/divi5"
             cp divi5/bootstrap.php "$dest/divi5/"
-            cp -r divi5/modules divi5/modules-json divi5/scripts divi5/styles "$dest/divi5/"
+            for part in modules modules-json scripts styles; do
+              if [ -d "divi5/$part" ]; then cp -r "divi5/$part" "$dest/divi5/"; fi
+            done
           fi
 
           if [ -d assets/src ] && [ -n "$(find assets/src -name '*.ts' -o -name '*.scss' | head -n 1)" ] && [ ! -d "$dest/assets/dist" ]; then
