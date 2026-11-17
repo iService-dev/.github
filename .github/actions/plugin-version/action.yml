@@ -36,13 +36,22 @@ runs:
           exit 1
         fi
 
-        if ! remote_tags="$(git ls-remote --tags --refs origin 'v*')"; then
+        if ! remote_tags="$(git ls-remote --tags origin 'v*')"; then
           echo "::error::Could not read the release tags from the repository."
           exit 1
         fi
         latest="$(sed 's#.*refs/tags/v##' <<<"$remote_tags" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
 
-        if [ -n "$latest" ]; then
+        tag_commit() {
+          local peeled plain
+          peeled="$(awk -v ref="refs/tags/v$1^{}" '$2 == ref { print $1 }' <<<"$remote_tags")"
+          plain="$(awk -v ref="refs/tags/v$1" '$2 == ref { print $1 }' <<<"$remote_tags")"
+          echo "${peeled:-$plain}"
+        }
+
+        if [ -n "$latest" ] && [ "$version" = "$latest" ] && [ "$(tag_commit "$latest")" = "$(git rev-parse HEAD)" ]; then
+          echo "Tag v${version} already points to this commit: re-running its release."
+        elif [ -n "$latest" ]; then
           IFS=. read -r major minor patch <<<"$latest"
           next_patch="$major.$minor.$((patch + 1))"
           next_minor="$major.$((minor + 1)).0"
