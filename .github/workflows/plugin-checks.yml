@@ -26,7 +26,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Release pull request comes from dev
+        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::Pull requests into main must come from dev (this one comes from '${HEAD_REF}')."
+            exit 1
+          fi
+
+      - name: Release version
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && github.base_ref == 'main' }}
+        uses: iService-dev/.github/.github/actions/plugin-version@main
+
       - name: Plugin header and versions
+        if: ${{ !cancelled() }}
         id: header
         run: |
           set -uo pipefail

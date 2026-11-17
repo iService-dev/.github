@@ -1,0 +1,57 @@
+name: Plugin release
+
+# Releases the plugin zip built and tested by plugin-checks.yml in the same
+# run. The version comes from the plugin header (set by a developer on dev);
+# nothing is committed to the repository.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Release version
+        id: version
+        uses: iService-dev/.github/.github/actions/plugin-version@main
+
+      - name: Download tested plugin zip
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ steps.version.outputs.slug }}-${{ github.sha }}
+          path: package
+
+      - name: Name zip after the version
+        env:
+          SLUG: ${{ steps.version.outputs.slug }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: mv "package/$SLUG.zip" "package/$SLUG-$VERSION.zip"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $VERSION"
+          git push origin "$TAG"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.version }}
+          files: package/${{ steps.version.outputs.slug }}-${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true

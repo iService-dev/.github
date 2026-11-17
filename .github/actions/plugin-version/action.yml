@@ -1,0 +1,63 @@
+name: Plugin version
+description: >
+  Reads the Version header of the plugin's main file and checks that it is
+  exactly one patch, minor or major step above the latest v* release tag.
+
+outputs:
+  slug:
+    description: Plugin slug (main file name without .php).
+    value: ${{ steps.version.outputs.slug }}
+  version:
+    description: Version from the plugin header.
+    value: ${{ steps.version.outputs.version }}
+  tag:
+    description: Release tag for this version (v + version).
+    value: ${{ steps.version.outputs.tag }}
+
+runs:
+  using: composite
+  steps:
+    - id: version
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        mapfile -t mains < <(grep -lE '^[[:space:]/*#]*Plugin Name:' ./*.php 2>/dev/null)
+        if [ "${#mains[@]}" -ne 1 ]; then
+          echo "::error::Expected exactly one main plugin file with a 'Plugin Name:' header in the repository root, found ${#mains[@]}."
+          exit 1
+        fi
+        main="${mains[0]#./}"
+        slug="${main%.php}"
+        version="$(head -n 40 "$main" | grep -m1 -E '^[[:space:]/*#]*Version:' | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]*$//')"
+
+        if ! [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+          echo "::error file=${main}::Header 'Version' must look like 1.2.3 (found: '${version}')."
+          exit 1
+        fi
+
+        if ! remote_tags="$(git ls-remote --tags --refs origin 'v*')"; then
+          echo "::error::Could not read the release tags from the repository."
+          exit 1
+        fi
+        latest="$(sed 's#.*refs/tags/v##' <<<"$remote_tags" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+
+        if [ -n "$latest" ]; then
+          IFS=. read -r major minor patch <<<"$latest"
+          next_patch="$major.$minor.$((patch + 1))"
+          next_minor="$major.$((minor + 1)).0"
+          next_major="$((major + 1)).0.0"
+          if [ "$version" != "$next_patch" ] && [ "$version" != "$next_minor" ] && [ "$version" != "$next_major" ]; then
+            echo "::error file=${main}::Version ${version} is not a valid next version after the latest release ${latest}. Set 'Version:' in ${main} on dev to ${next_patch} (patch), ${next_minor} (minor) or ${next_major} (major)."
+            exit 1
+          fi
+          echo "Version ${latest} -> ${version}"
+        else
+          echo "No release yet, first release will be ${version}"
+        fi
+
+        {
+          echo "slug=$slug"
+          echo "version=$version"
+          echo "tag=v$version"
+        } >> "$GITHUB_OUTPUT"
