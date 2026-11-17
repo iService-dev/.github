@@ -1,0 +1,177 @@
+name: Plugin checks
+
+# Quick checks for iService WordPress plugins. Called from each plugin's
+# .github/workflows/checks.yml and from deploy.yml before a release.
+# Everything runs in one job: GitHub bills every job rounded up to a full
+# minute, so separate jobs would cost several minutes per push.
+
+on:
+  workflow_call:
+    inputs:
+      newest-php:
+        description: Newest PHP version the plugin code is linted against.
+        type: string
+        default: "8.5"
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Plugin checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Plugin header and versions
+        id: header
+        run: |
+          set -uo pipefail
+          errors=0
+          fail() { echo "::error file=${2:-}::$1"; errors=$((errors + 1)); }
+
+          mapfile -t mains < <(grep -lE '^[[:space:]/*#]*Plugin Name:' ./*.php 2>/dev/null)
+          if [ "${#mains[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one main plugin file with a 'Plugin Name:' header in the repository root, found ${#mains[@]}."
+            exit 1
+          fi
+          main="${mains[0]#./}"
+          slug="${main%.php}"
+
+          header() {
+            head -n 40 "$main" | grep -m1 -E "^[[:space:]/*#]*$1:" | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]*$//'
+          }
+
+          requires_php="$(header 'Requires PHP')"
+          requires_wp="$(header 'Requires at least')"
+          domain_path="$(header 'Domain Path')"
+          text_domain="$(header 'Text Domain')"
+
+          [[ "$requires_php" =~ ^[0-9]+\.[0-9]+$ ]] \
+            || fail "Header 'Requires PHP' must be a version like 8.3 (found: '${requires_php}')." "$main"
+          [[ "$requires_wp" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
+            || fail "Header 'Requires at least' must be a WordPress version like 6.5 (found: '${requires_wp}')." "$main"
+          [ "$domain_path" = "/languages" ] \
+            || fail "Header 'Domain Path' must be '/languages' (found: '${domain_path}')." "$main"
+          [ "$text_domain" = "$slug" ] \
+            || fail "Header 'Text Domain' must equal the plugin slug '${slug}' (found: '${text_domain}')." "$main"
+
+          if [ "$slug" != "is-base-plugin" ]; then
+            base_version="$(grep -m1 -oE "\\\$required_base_version[[:space:]]*=[[:space:]]*['\"][^'\"]*['\"]" "$main" | sed -E "s/.*['\"]([^'\"]*)['\"]$/\1/")"
+            [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || fail "\$required_base_version must be an IS Base Plugin version like 1.2.57 (found: '${base_version}')." "$main"
+          fi
+
+          echo "Plugin: $slug ($main)"
+          echo "Requires PHP: $requires_php · Requires at least: $requires_wp · Text Domain: $text_domain"
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          echo "min-php=$requires_php" >> "$GITHUB_OUTPUT"
+
+          cat > "$RUNNER_TEMP/php-lint.sh" <<'LINT'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          php --version | head -n 1
+          status=0
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            out="$(php -d display_errors=stderr -d log_errors=0 -d error_reporting=-1 -l "$file" 2>&1)"
+            code=$?
+            problems="$(grep -vE '^(No syntax errors detected|Errors parsing)' <<<"$out" | grep -v '^[[:space:]]*$')"
+            if [ $code -ne 0 ] || [ -n "$problems" ]; then
+              line="$(grep -m1 -oE 'on line [0-9]+$' <<<"$problems" | grep -oE '[0-9]+')"
+              message="$(sed -E 's/ in \.\/[^ ]+ on line [0-9]+$//' <<<"$problems" | tr '\n' ' ')"
+              echo "::error file=${file#./},line=${line:-1}::${message}"
+              status=1
+            fi
+          done < <(find . -name '*.php' -not -path '*/node_modules/*' -not -path './vendor/*' -not -path './divi5/vendor/*' -print0)
+          echo "Checked $count PHP files."
+          exit $status
+          LINT
+          chmod +x "$RUNNER_TEMP/php-lint.sh"
+
+          [ "$errors" -eq 0 ] || exit 1
+
+      - name: Set up PHP ${{ inputs.newest-php }}
+        if: ${{ !cancelled() && steps.header.outputs.min-php != '' && steps.header.outputs.min-php != inputs.newest-php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.newest-php }}
+          coverage: none
+          tools: none
+
+      - name: PHP ${{ inputs.newest-php }} syntax
+        if: ${{ !cancelled() && steps.header.outputs.min-php != '' && steps.header.outputs.min-php != inputs.newest-php }}
+        run: "\"$RUNNER_TEMP/php-lint.sh\""
+
+      - name: Set up PHP ${{ steps.header.outputs.min-php }} (Requires PHP)
+        if: ${{ !cancelled() && steps.header.outputs.min-php != '' }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ steps.header.outputs.min-php }}
+          coverage: none
+          tools: composer
+
+      - name: PHP ${{ steps.header.outputs.min-php }} syntax (Requires PHP)
+        if: ${{ !cancelled() && steps.header.outputs.min-php != '' }}
+        run: "\"$RUNNER_TEMP/php-lint.sh\""
+
+      - name: Set up Node.js
+        if: ${{ !cancelled() }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install Node dependencies
+        if: ${{ !cancelled() }}
+        run: npm ci
+
+      - name: Build and lint assets (oxlint, stylelint, Vite)
+        id: build
+        if: ${{ !cancelled() }}
+        run: npm run build
+
+      - name: Composer
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && hashFiles('composer.json') != '' }}
+        run: composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+
+      - name: Package plugin zip (same layout as the release)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.header.outputs.slug != '' }}
+        env:
+          SLUG: ${{ steps.header.outputs.slug }}
+        run: |
+          set -euo pipefail
+          dest="package/$SLUG"
+          mkdir -p "$dest"
+          cp "$SLUG.php" "$dest/"
+          cp -r includes "$dest/" || true
+          mkdir -p "$dest/assets"
+          cp -r assets/dist "$dest/assets/" || true
+          cp -r languages "$dest/" || true
+          if [ -d vendor ]; then cp -r vendor "$dest/"; fi
+          if [ -d divi5 ]; then
+            mkdir -p "$dest/divi5"
+            cp divi5/bootstrap.php "$dest/divi5/"
+            cp -r divi5/modules divi5/modules-json divi5/scripts divi5/styles "$dest/divi5/"
+          fi
+
+          if [ -d assets/src ] && [ -n "$(find assets/src -name '*.ts' -o -name '*.scss' | head -n 1)" ] && [ ! -d "$dest/assets/dist" ]; then
+            echo "::error::The build produced no assets/dist although assets/src has TypeScript or SCSS."
+            exit 1
+          fi
+
+          (cd package && zip -qr "$SLUG.zip" "$SLUG")
+          echo "Built package/$SLUG.zip ($(du -h "package/$SLUG.zip" | cut -f1))"
+
+      - name: Upload plugin zip
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.header.outputs.slug != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.header.outputs.slug }}-${{ github.sha }}
+          path: package/${{ steps.header.outputs.slug }}.zip
+          retention-days: 5
+          if-no-files-found: error
